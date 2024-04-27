@@ -1,0 +1,31 @@
+{
+  "name": "@hoomanlogic/http",
+  "version": "0.0.2",
+  "description": "A function that wraps fetch api for semantically creating and dispatching an http request with functional chaining",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/hoomanlogic/http.git"
+  },
+  "keywords": [
+    "fetch",
+    "http",
+    "functional-chaining"
+  ],
+  "author": "Geoffrey Floyd <geoffrey.floyd@hoomanlogic.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "typescript": "^5.4.5"
+  }
+}
