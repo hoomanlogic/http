@@ -10,8 +10,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "test"
+    "build": "tsc"
   },
   "repository": {
     "type": "git",
@@ -20,10 +19,11 @@
   "keywords": [
     "fetch",
     "http",
-    "functional-chaining"
+    "functional-chaining",
+    "functional programming"
   ],
   "author": "Geoffrey Floyd <geoffrey.floyd@hoomanlogic.com>",
-  "license": "MIT",
+  "license": "ISC",
   "devDependencies": {
     "@types/node": "^20.12.7",
     "typescript": "^5.4.5"
