@@ -135,8 +135,10 @@ export default function (http) {
      * Mock an http request based on the method and url, optionally pass a request map
      * object in the shape { delete: {}, get: {}, post: {}, put: {} }.
      *
-     * Handler should return array of [status : number, headers : {}, body : ?string]
+     * Handler should return a fetch `Response` object
      * or undefined to leave the request unhandled.
+     * 
+     * You can use `http.mockResponse` to build a `Response` object.
      * @memberof http-mock
      */
     http.mock = function (method, url, handler) {
@@ -198,12 +200,14 @@ export default function (http) {
      * @param {*} body
      * @memberof http-mock
      */
-    http.mockResponse = function (status, body) {
-        return [
-            status,
-            { 'Content-Type': 'application/json; charset=utf-8' },
+    http.mockResponse = function (status, body, headers = {}) {
+        return new Response(
             typeof body === 'string' ? body : JSON.stringify(body),
-        ];
+            {
+                status,
+                headers,
+            }
+        );
     };
 
     /**
@@ -233,25 +237,7 @@ export default function (http) {
         return Promise.all(promises);
     };
 
-    /**
-     * A promise wrapper around a fetch response.
-     * @param {*} response
-     * @private
-     */
-    http.promiseMockedResponse = function (response) {
-        if (response[0] === 200) {
-            let json = (response[2] && response[2] !== 'OK') ?
-                JSON.parse(response[2])
-                :
-                undefined;
-            return Promise.resolve(json);
-        }
-        else {
-            return Promise.resolve({ status: response[0] })
-        }
-    };
-
-    http.record = function (response) {
+    http.tryRecord = function (response) {
         var recordReponseHandled = false;
         if (http.onRecordResponse) {
             recordReponseHandled = http.onRecordResponse(this, response);
@@ -266,15 +252,14 @@ export default function (http) {
                 http.requestCatcher[method][url][this.opts.body] = 'OK';
             }
             else {
-                http.requestCatcher[method][url] = 'OK';
+                http.requestCatcher[method][url] = response.body || 'OK';
             }
         }
         return response;
     } 
 
     /**
-     * This is used internally by the `http` module when not in production mode,
-     * if the request is not handled by a mock it will continue as normal.
+     * This is used internally by the `http` module when wrapped with this mock module.
      * @param {*} httpMethod
      * @param {*} url
      * @param {*} requestBody
@@ -294,7 +279,7 @@ export default function (http) {
         if (handler) {
             let response = handler({ params, requestBody: opts.body, url });
             if (response) {
-                return http.promiseMockedResponse(response);
+                return Promise.resolve(response);
             }
         }
         else {
@@ -344,7 +329,7 @@ export default function (http) {
                     handler = http.mockMap[method][mockUrl];
                     let response = handler({ params, requestBody: opts.body, url });
                     if (response) {
-                        return http.promiseMockedResponse(response);
+                        return Promise.resolve(response);
                     }
 
                     // Break out of outer loop of mock keys
@@ -367,7 +352,7 @@ export default function (http) {
             }
             let response = http.onUnmockedRequest(method, url, opts.body);
             if (response) {
-                return http.promiseMockedResponse(response);
+                return Promise.resolve(response);
             }
         }
     };
