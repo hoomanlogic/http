@@ -10,9 +10,7 @@ class HttpRequest {
         method: string;
         body: any;
         // Temporary options used to build the fetch options
-        header?: {}
         noHeaderDefaults?: boolean;
-        recordQueryParams?: boolean;
         responsePipeline?: ResponsePipelineJob[];
     };
     url: string;
@@ -23,13 +21,11 @@ class HttpRequest {
         this.opts = opts || {};
         this.opts.headers = {
             ...(this.opts.noHeaderDefaults ? {} : defaults.headers),
-            ...(this.opts.header || {}),
         };
 
         this.responsePipeline = this.opts.responsePipeline || defaults.responsePipeline || [];
 
         // Remove non `fetch` options
-        delete this.opts.header;
         delete this.opts.noHeaderDefaults;
         delete this.opts.responsePipeline;
     }
@@ -38,25 +34,11 @@ class HttpRequest {
      * REQUEST BUILDER - CHAINABLE FUNCTIONS
      *************************************************************/
     /**
-     * Add body to a request
-     * @param {*} body
-     * @memberof http
-     * @instance
-     */
-    withBody (body) {
-        Object.assign(this.opts, {
-            body: body,
-        });
-        return this;
-    }
-
-    /**
      * Add credentials header, defaults to same-origin.
      * Note that the underlying fetch api defaults to
      * same-origin, so unless you pass an arg, it's almost
      * certainly not necessary to call this method.
-     * @memberof http
-     * @instance
+     * @returns {HttpRequest}
      */
     withCreds (credentials: 'same-origin' | 'include' | 'omit' = 'same-origin') {
         Object.assign(this.opts, {
@@ -66,55 +48,101 @@ class HttpRequest {
     }
 
     /**
+     * Add body to a request. You can either supply the content type as a second argument or it will be inferred by the body type.
+     * @returns {HttpRequest}
+     */
+    withBody (body, contentType = '') {
+        if (contentType) {
+            // Merge Headers nested object
+            var headers = Object.assign({}, this.opts.headers, {
+                'Content-Type': contentType,
+            });
+
+            // Merge object
+            Object.assign(this.opts, {
+                body: body,
+                headers: headers,
+            });
+            return this;
+        }
+
+        // Detect the type of body and set the content type header
+        if (body instanceof Blob) {
+            return this.withBlobBody(body);
+        }
+        if (body instanceof ArrayBuffer) {
+            return this.withArrayBufferBody(body);
+        }
+        if (body instanceof FormData) {
+            return this.withFormDataBody(body);
+        }
+        if (body instanceof ReadableStream) {
+            return this.withReadableStreamBody(body);
+        }
+        if (body instanceof URLSearchParams) {
+            return this.withUrlSearchParamsBody(body);
+        }
+        if (typeof body === 'string') {
+            return this.withTextBody(body);
+        }
+        return this.withJsonBody(body);
+    }
+
+    /**
+     * Add Blob body and set content type header.
+     * @param {Blob} body - Blob to set to the body.
+     * @returns {HttpRequest}
+     */
+    withBlobBody (body: Blob) {
+        return this.withBody(body, 'application/octet-stream');
+    }
+
+    /**
+     * Add ArrayBuffer body and set content type header.
+     * @param {ArrayBuffer} body - ArrayBuffer to set to the body.
+     * @returns {HttpRequest}
+     */
+    withArrayBufferBody (body: ArrayBuffer) {
+        return this.withBody(body, 'application/octet-stream');
+    }
+
+    withFormDataBody (body: FormData) {
+        return this.withBody(body, 'multipart/form-data');
+    }
+
+    withReadableStreamBody (body: ReadableStream) {
+        return this.withBody(body, 'application/octet-stream');
+    }
+
+    withTextBody (body: string) {
+        return this.withBody(body, 'text/plain');
+    }
+
+    withUrlSearchParamsBody (body: URLSearchParams) {
+        return this.withBody(body, 'application/x-www-form-urlencoded');
+    }
+
+    /**
      * Add JSON body and set content type header.
      * @param {*} body - JS value to stringify() and set to the body.
      * @memberof http
      * @instance
      */
-    withJsonBody (body) {
-        // Merge Headers nested object
-        var headers = Object.assign({}, this.opts.headers, {
-            'Content-Type': 'application/json',
-        });
-
-        // Merge object
-        Object.assign(this.opts, {
-            body: JSON.stringify(body),
-            headers: headers,
-        });
-        return this;
+    withJsonBody (body, skipStringify = false) {
+        return this.withBody(skipStringify ? body : JSON.stringify(body), 'application/json');
     }
 
     /**
-     * Add JSON body and set content type header, without stringifying the value.
-     * @param {string} body
-     * @memberof http
-     * @instance
+     * Add accept header to the request. This is generally not needed because the various `request*` methods
+     * will set the accept header for you. However, if you need to set the accept header manually, you can use this method.
+     * @param {string} key - Header key.
+     * @param {string} value - Header value.
+     * @returns {HttpRequest}
      */
-    withStringBody (body: string) {
+    accept (contentType) {
         // Merge Headers nested object
         var headers = Object.assign({}, this.opts.headers, {
-            'Content-Type': 'application/json',
-        });
-
-        // Merge object
-        Object.assign(this.opts, {
-            body: body,
-            headers: headers,
-        });
-        return this;
-    }
-
-    /**
-     * Set the Accept header to JSON. You can also end your functional chain w/ `requestJson()`
-     * to both set this header and initiate the fetch request, returning a Promise.
-     * @memberof http
-     * @instance
-     */
-    acceptJson () {
-        // Merge Headers nested object
-        var headers = Object.assign({}, this.opts.headers, {
-            Accept: 'application/json',
+            Accept: contentType,
         });
 
         // Merge object
@@ -182,7 +210,8 @@ class HttpRequest {
      * REQUESTS (DISPATCH HTTP REQUEST AND RETURN PROMISE)
      *************************************************************/
     /**
-     * Initiate the fetch request
+     * Initiate the fetch request and return the fetch `Response` object.
+     * see: https://developer.mozilla.org/en-US/docs/Web/API/Response
      * @memberof http
      * @returns {Promise<Response>}
      * @instance
@@ -190,12 +219,12 @@ class HttpRequest {
     request () {
         // Build request promise
         var request = (http.tryMocked && http.tryMocked(this.url, this.opts)) || fetch(this.url, this.opts)
-        for (let job of this.responsePipeline) {
-            if (job.catch) {
-                request = request.catch(job.job);
+        for (let { catch: isCatch, job } of this.responsePipeline) {
+            if (isCatch) {
+                request = request.catch(job);
             }
             else {
-                request = request.then(job.job);
+                request = request.then(job);
             }
         }
 
@@ -212,6 +241,39 @@ class HttpRequest {
     }
 
     /**
+     * Initiate the fetch request w/ the Accept Array Buffer header and return the body as an `ArrayBuffer`.
+     * @memberof http
+     * @returns {Promise<Response>}
+     * @instance
+     */
+    requestArrayBuffer () {
+        this.accept('application/octet-stream');
+        return this.request().then(res => res.status === 204 ? null : res.arrayBuffer());
+    }
+
+    /**
+     * Initiate the fetch request w/ the Accept Blob header and return the body as a `Blob`.
+     * @memberof http
+     * @returns {Promise<Response>}
+     * @instance
+     */
+    requestBlob () {
+        this.accept('application/octet-stream');
+        return this.request().then(res => res.status === 204 ? null : res.blob());
+    }
+
+    /**
+     * Initiate the fetch request w/ the Accept Form Data header and return the body as `FormData`.
+     * @memberof http
+     * @returns {Promise<Response>}
+     * @instance
+     */
+    requestFormData () {
+        this.accept('multipart/form-data');
+        return this.request().then(res => res.status === 204 ? null : res.formData());
+    }
+
+    /**
      * Initiate the fetch request w/ the Accept JSON header and return the parsed JSON body (or null if no body).
      * @memberof http
      * @returns {Promise<Response>}
@@ -220,8 +282,19 @@ class HttpRequest {
     requestJson () {
         // Set Accept header to json
         // and build request promise
-        this.acceptJson();
+        this.accept('application/json');
         return this.request().then(res => res.status === 204 ? null : res.json());
+    }
+
+    /**
+     * Initiate the fetch request w/ the Accept Text header and return the body as text.
+     * @memberof http
+     * @returns {Promise<Response>}
+     * @instance
+     */
+    requestText () {
+        this.accept('text/plain');
+        return this.request().then(res => res.status === 204 ? null : res.text());
     }
 }
 
@@ -251,9 +324,19 @@ type ResponsePipelineJob = {
 };
 
 /**
- * Start building a fetch request, defaults to GET method.
- * @param {*} url
- * @param {*} opts
+ * Start building a fetch request, defaults to GET method. Aside from the options supported by fetch,
+ * there are two additional options: `noHeaderDefaults` and `responsePipeline`. The former is a boolean
+ * that, when true, will prevent the default headers from being added to the request. The latter is an
+ * array of functions that will be applied to the response object before the promise is resolved. Use
+ * `buildResponsePipeline` to create a response pipeline.
+ * 
+ * See: https://developer.mozilla.org/en-US/docs/Web/API/Request/Request for more info on fetch options.
+ * @param {string} url
+ * @param {{
+ * 
+ * headers: {},
+ * noHeaderDefaults?: boolean,
+ * }} opts
  * @memberof http
  */
 const http = function (url, opts) {

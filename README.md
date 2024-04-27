@@ -15,14 +15,69 @@ npm install --save @hoomanlogic/http
 ```js
 import http from '@hoomanlogic/http';
 
-// Simple get request with a JSON response
-var response = await http('/api/pets').requestJson();
+// Simple get request returning a JSON response
+var jsonResponse = await http('/api/pets').requestJson();
 
-// Post JSON request with JSON response
-var response = await http('/api/pets').post().withJsonBody({ name: 'Fido', type: 'dog', age: 5 }).requestJson();
+// Post JSON request returning a JSON response
+var jsonResponse = await http('/api/pets').post().withJsonBody({ name: 'Fido', type: 'dog', age: 5 }).requestJson();
 
-// Delete JSON request with no response
-await http(`/api/pets/${response.id}`).del().request();
+// Delete request returning a fetch `Response` response
+// See: <https://developer.mozilla.org/en-US/docs/Web/API/Response> for more info.
+var fetchResponse = await http(`/api/pets/${response.id}`).del().request();
+```
+
+## Options
+
+Akin to `fetch`, `http` supports a second argument with options.
+
+Aside from the options supported by fetch, there are two additional options:
+
+- `noHeaderDefaults` - a boolean that, when true, will prevent the default headers from being added to the request
+- `responsePipeline`. The former is an array of functions that will be applied to the response object before the promise is resolved. Use `buildResponsePipeline` to create a response pipeline.
+ 
+ See: <https://developer.mozilla.org/en-US/docs/Web/API/Request/Request> for more info on fetch options.
+
+## Configuring Defaults
+
+You can configure default headers for requests and a default response pipeline to handle
+responses. 
+
+```js
+import { setHttpDefaults } from '@hoomanlogic/http';
+
+setHttpDefaults({
+    headers: {
+        app_version: global.appVersion,
+    },
+    responsePipeline: buildResponsePipeline((response) => {
+        if (response.status >= 200 && response.status < 300) {
+            return response;
+        }
+        else {
+            var error = new Error(response.statusText);
+            error.response = response;
+            throw error;
+        }
+    }).catch((err) => {
+        // Get response object from error
+        var response;
+        if (err && err.response) {
+            response = err.response;
+        }
+        else {
+            response = err;
+        }
+
+        // Session not valid or redirect code
+        if (!redirecting && response && [ 302, 419 ].includes(response.status)) {
+            // Redirect to logon page
+            window.location.href = '/Login?ReturnUrl=' + encodeURIComponent(window.location.pathname);
+        }
+
+        // Rethrow all other errors down the chain
+        throw err;
+    }).build(),
+});
 ```
 
 ## Mocking Requests
