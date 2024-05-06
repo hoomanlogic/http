@@ -59,40 +59,18 @@ export class HttpRequest {
      * @returns {HttpRequest} - Returns the current instance of the HttpRequest.
      */
     withBody (body, contentType = '') : HttpRequest {
+        this.opts.body = body;
+
         if (contentType) {
             // Merge Headers nested object
             var headers = Object.assign({}, this.opts.headers, {
                 'Content-Type': contentType,
             });
 
-            // Merge object
-            Object.assign(this.opts, {
-                body: body,
-                headers: headers,
-            });
-            return this;
+            this.opts.headers = headers;
         }
 
-        // Detect the type of body and set the content type header
-        if (body instanceof Blob) {
-            return this.withBlobBody(body);
-        }
-        if (body instanceof ArrayBuffer) {
-            return this.withArrayBufferBody(body);
-        }
-        if (body instanceof FormData) {
-            return this.withFormDataBody(body);
-        }
-        if (body instanceof ReadableStream) {
-            return this.withReadableStreamBody(body);
-        }
-        if (body instanceof URLSearchParams) {
-            return this.withUrlSearchParamsBody(body);
-        }
-        if (typeof body === 'string') {
-            return this.withTextBody(body);
-        }
-        return this.withJsonBody(body);
+        return this;
     }
 
     /**
@@ -114,12 +92,13 @@ export class HttpRequest {
     }
 
     /**
-     * Add FormData body and set content type header.
+     * Add FormData body and set content type header. In the browser, just use `withBody`
+     * and pass the FormData object, the browser will automatically set the content type header.
      * @param {FormData} body
      * @returns {HttpRequest} - Returns the current instance of the HttpRequest.
      */
-    withFormDataBody (body: FormData) : HttpRequest {
-        return this.withBody(body, 'multipart/form-data');
+    withFormDataBody (body: FormData, boundary) : HttpRequest {
+        return this.withBody(body, 'multipart/form-data; boundary=' + boundary);
     }
 
     /**
