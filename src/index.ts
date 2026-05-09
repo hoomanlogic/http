@@ -30,6 +30,7 @@ export class HttpRequest {
         this.opts = requestInitOptions;
         this.opts.headers = {
             ...(noHeaderDefaults ? {} : defaults.headers),
+            ...(requestInitOptions.headers || {}),
         };
 
         this.responsePipeline = responsePipeline || defaults.responsePipeline || [];
