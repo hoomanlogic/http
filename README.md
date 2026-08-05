@@ -26,6 +26,49 @@ var jsonResponse = await http('/api/pets').post().withJsonBody({ name: 'Fido', t
 var fetchResponse = await http(`/api/pets/${response.id}`).del().request();
 ```
 
+## Streaming
+
+For responses you want to consume as they arrive rather than in one piece, the
+`request*Stream` / `requestSse` dispatchers return async iterables.
+
+```js
+// Server-Sent Events, framed per the SSE spec
+for await (var event of http('/api/chat').post().withJsonBody({ prompt }).requestSse()) {
+    console.log(event.event, JSON.parse(event.data));
+}
+
+// Raw text as it arrives, chunk by chunk
+for await (var chunk of http('/api/logs').requestTextStream()) {
+    process.stdout.write(chunk);
+}
+
+// Or take the ReadableStream and drive the reader yourself
+var stream = await http('/api/download').requestStream();
+```
+
+Use `withSignal` to make a stream cancellable:
+
+```js
+var controller = new AbortController();
+for await (var event of http('/api/chat').withSignal(controller.signal).requestSse()) {
+    // ... controller.abort() ends the stream, as does `break`
+}
+```
+
+Notes:
+
+- Unlike the non-streaming dispatchers, these **reject on a non-ok response** -
+  once you hold an iterator, the body is all there is, so the status has to
+  surface up front. The error carries `status` and `response`.
+- `requestTextStream` never splits a multi-byte character across chunks, and
+  falls back to yielding the whole body at once when the response has no
+  readable body (a mock, a non-streaming polyfill).
+- `requestSse` yields `{ data, event, id, retry }`. Comment lines (`:`
+  keepalives) are skipped, multiple `data:` lines are joined with newlines, and
+  an unterminated final frame is discarded - same as `EventSource`.
+- `createSseDecoder()` is exported for framing a stream you're reading yourself:
+  `decoder.push(text)` returns the events that text completed.
+
 ## Options
 
 Akin to `fetch`, `http` supports a second argument with options.

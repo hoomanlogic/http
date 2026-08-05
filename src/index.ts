@@ -185,6 +185,18 @@ export class HttpRequest {
         return this;
     }
 
+    /**
+     * Set the `AbortSignal` that cancels the request. Same as passing `signal`
+     * in the options, but chainable - streams are the usual thing you want to
+     * be able to cancel.
+     * @param {AbortSignal} signal - The signal to abort the request with.
+     * @returns {HttpRequest} - Returns the current instance of the HttpRequest.
+     */
+    withSignal (signal: AbortSignal) : HttpRequest {
+        this.opts.signal = signal;
+        return this;
+    }
+
     /*************************************************************
      * REQUESTS (DISPATCH HTTP REQUEST AND RETURN PROMISE)
      *************************************************************/
@@ -258,6 +270,237 @@ export class HttpRequest {
         this.accept('text/plain');
         return this.request().then(res => res.status === 204 ? null : res.text());
     }
+
+    /*************************************************************
+     * STREAMING REQUESTS (DISPATCH AND CONSUME THE BODY AS IT ARRIVES)
+     *************************************************************/
+    /**
+     * Initiate the fetch request and return the response body as a
+     * `ReadableStream` of bytes, for callers that want to drive the reader
+     * themselves. Rejects on a non-ok response, and on a response that has no
+     * readable body.
+     * @returns {Promise<ReadableStream>}
+     */
+    requestStream () : Promise<ReadableStream<Uint8Array>> {
+        return requestOk(this).then(res => {
+            if (!hasBodyStream(res)) {
+                throw new Error('Response has no readable body stream');
+            }
+            return res.body as ReadableStream<Uint8Array>;
+        });
+    }
+
+    /**
+     * Initiate the fetch request and yield the response body as text, chunk by
+     * chunk as it arrives. A multi-byte character split across a chunk boundary
+     * is held back until the rest of it lands, so every yielded string is whole.
+     *
+     * A response with no readable body - a mock, a non-streaming polyfill -
+     * yields its whole body as a single chunk rather than failing, so callers
+     * don't have to special-case those environments.
+     *
+     * Rejects on a non-ok response: once the caller holds an iterator the body
+     * is all there is, so the status has to surface here or not at all. The
+     * error carries `status` and `response`.
+     */
+    async *requestTextStream () : AsyncGenerator<string, void, undefined> {
+        var res = await requestOk(this);
+        if (!hasBodyStream(res)) {
+            let whole = await res.text();
+            if (whole) {
+                yield whole;
+            }
+            return;
+        }
+
+        var reader = (res.body as ReadableStream<Uint8Array>).getReader();
+        var decoder = new TextDecoder();
+        try {
+            for (;;) {
+                let result = await reader.read();
+                if (result.done) {
+                    break;
+                }
+                let text = decoder.decode(result.value, { stream: true });
+                if (text) {
+                    yield text;
+                }
+            }
+            // Flush whatever the decoder was holding for a continuation byte
+            // that never came.
+            let tail = decoder.decode();
+            if (tail) {
+                yield tail;
+            }
+        }
+        finally {
+            // Reached on an early `break` out of the consumer's loop too -
+            // drop the connection rather than leaving it hanging open.
+            reader.cancel().catch(() => {});
+        }
+    }
+
+    /**
+     * Initiate the fetch request w/ the Accept text/event-stream header and
+     * yield each Server-Sent Event as it arrives.
+     *
+     * Events are framed per the SSE spec: `data:` lines accumulate and are
+     * joined with newlines, comment lines (`:` keepalives) and unknown fields
+     * are ignored, and a blank line dispatches the event. Frames carrying no
+     * data are not yielded - a bare `id:` or a keepalive isn't an event a
+     * caller needs to see - and a final frame left unterminated when the stream
+     * ends is discarded, same as `EventSource` does.
+     */
+    async *requestSse () : AsyncGenerator<SseEvent, void, undefined> {
+        this.accept('text/event-stream');
+        var decoder = createSseDecoder();
+        for await (let chunk of this.requestTextStream()) {
+            let events = decoder.push(chunk);
+            for (let i = 0; i < events.length; i++) {
+                yield events[i];
+            }
+        }
+    }
+}
+
+/**
+ * Dispatch a request and reject when the response is not ok. Streaming callers
+ * get no second look at the status - once they hold an iterator, the body is
+ * all there is - and an error body is never the stream they asked for. The
+ * rejection carries `status` and `response`.
+ */
+function requestOk (req: HttpRequest) : Promise<Response> {
+    return req.request().then(res => {
+        if (!res.ok) {
+            var error = new Error('HTTP ' + res.status + (res.statusText ? ' ' + res.statusText : ''));
+            (error as any).status = res.status;
+            (error as any).response = res;
+            throw error;
+        }
+        return res;
+    });
+}
+
+/**
+ * Whether a response body can be read incrementally. Mocks and non-streaming
+ * polyfills hand back a response with no body, or one that isn't a stream.
+ */
+function hasBodyStream (res: Response) : boolean {
+    return !!res.body && typeof (res.body as any).getReader === 'function';
+}
+
+/**
+ * One Server-Sent Event.
+ */
+export type SseEvent = {
+    /** The `data:` lines of the frame, joined with newlines. */
+    data: string;
+    /** The `event:` field, or `'message'` when the frame didn't name one. */
+    event: string;
+    /** The most recent `id:` seen on the stream, or `''` if there hasn't been one. */
+    id: string;
+    /** The most recent `retry:` reconnection time in ms, or `null` if there hasn't been one. */
+    retry: number | null;
+};
+
+/**
+ * Create an incremental Server-Sent Events decoder. Feed it text as it arrives
+ * via `push`, which returns the events that text completed and holds any
+ * partial frame back for the next call. `requestSse` is this driving
+ * `requestTextStream`; use it directly to frame a stream you're reading
+ * yourself.
+ */
+export function createSseDecoder () {
+    var buffer = '';
+    var data: string[] = [];
+    var eventType = '';
+    var lastId = '';
+    var retry: number | null = null;
+
+    /**
+     * Consume one complete line, returning an event if the line dispatched one.
+     */
+    function handleLine (line: string) : SseEvent | null {
+        // Blank line ends the frame and dispatches what has accumulated.
+        if (line === '') {
+            if (data.length === 0) {
+                eventType = '';
+                return null;
+            }
+            var event = {
+                data: data.join('\n'),
+                event: eventType || 'message',
+                id: lastId,
+                retry: retry,
+            };
+            data = [];
+            eventType = '';
+            return event;
+        }
+
+        // Comment - servers send these as keepalives.
+        if (line.charAt(0) === ':') {
+            return null;
+        }
+
+        var colon = line.indexOf(':');
+        var field = colon === -1 ? line : line.slice(0, colon);
+        var value = colon === -1 ? '' : line.slice(colon + 1);
+        // A single space after the colon is framing, not content.
+        if (value.charAt(0) === ' ') {
+            value = value.slice(1);
+        }
+
+        if (field === 'data') {
+            data.push(value);
+        }
+        else if (field === 'event') {
+            eventType = value;
+        }
+        else if (field === 'id') {
+            lastId = value;
+        }
+        else if (field === 'retry' && /^\d+$/.test(value)) {
+            retry = parseInt(value, 10);
+        }
+        return null;
+    }
+
+    return {
+        /**
+         * Feed the decoder the next piece of text and get back the events it
+         * completed.
+         * @param {string} chunk
+         * @returns {SseEvent[]}
+         */
+        push (chunk: string) : SseEvent[] {
+            buffer += chunk;
+            var events: SseEvent[] = [];
+            var start = 0;
+            var i = 0;
+            while (i < buffer.length) {
+                var ch = buffer.charAt(i);
+                if (ch !== '\n' && ch !== '\r') {
+                    i++;
+                    continue;
+                }
+                // A trailing CR may be the first half of a CRLF still in
+                // flight - wait for the next chunk to tell us which.
+                if (ch === '\r' && i === buffer.length - 1) {
+                    break;
+                }
+                var line = buffer.slice(start, i);
+                i += (ch === '\r' && buffer.charAt(i + 1) === '\n') ? 2 : 1;
+                start = i;
+                var event = handleLine(line);
+                if (event) {
+                    events.push(event);
+                }
+            }
+            buffer = buffer.slice(start);
+            return events;
+        },
+    };
 }
 
 /**

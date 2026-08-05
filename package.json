@@ -1,6 +1,6 @@
 {
   "name": "@hoomanlogic/http",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "A function that wraps fetch api for semantically creating and dispatching an http request with functional chaining",
   "main": "dist/index.js",
   "files": [
@@ -10,7 +10,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsc && node --test \"test/*.test.js\""
   },
   "repository": {
     "type": "git",
