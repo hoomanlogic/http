@@ -21,10 +21,16 @@ var jsonResponse = await http('/api/pets').requestJson();
 // Post JSON request returning a JSON response
 var jsonResponse = await http('/api/pets').post().withJsonBody({ name: 'Fido', type: 'dog', age: 5 }).requestJson();
 
+// Patch JSON request returning a JSON response
+var jsonResponse = await http(`/api/pets/${response.id}`).patch().withJsonBody({ age: 6 }).requestJson();
+
 // Delete request returning a fetch `Response` response
 // See: <https://developer.mozilla.org/en-US/docs/Web/API/Response> for more info.
 var fetchResponse = await http(`/api/pets/${response.id}`).del().request();
 ```
+
+The method builders are `post()`, `put()`, `patch()` and `del()`; a request that
+doesn't call one is a GET.
 
 ## Streaming
 
@@ -139,7 +145,11 @@ Mocking a request can be done at any time in a dev environment by calling `http.
 where the handler will be passed an object that may contain a 'requestBody' value if a body was supplied. The handler
 should return a `http.mockResponse(status, body)`, or `undefined` to signal that it was not handled.
 
-Alternatively, `http.mock(requestMap)` can be called to build mocks based on a request map.
+Alternatively, `http.mock(requestMap)` can be called to build mocks based on a request map, in the shape
+`{ delete: {}, get: {}, patch: {}, post: {}, put: {} }`. A method the map leaves out simply has nothing
+mocked for it. Recordings for the methods that carry a body — `patch`, `post` and `put` — are nested one
+level deeper, keyed by the request body, since the same url means different things depending on what was
+sent to it.
 
 Call `http.clearMocks()` to disable mocks and clear the mock map.
 

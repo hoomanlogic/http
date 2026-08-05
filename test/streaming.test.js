@@ -8,36 +8,7 @@ const assert = require('node:assert');
 
 const { createSseDecoder } = require('../dist/index.js');
 const http = require('../dist/index.js').default;
-
-/**
- * A Response whose body streams the given text in the given pieces, so a test
- * can control exactly where the chunk boundaries fall.
- */
-function streamedResponse (chunks, init = {}) {
-    var encoder = new TextEncoder();
-    var body = new ReadableStream({
-        start (controller) {
-            chunks.forEach(chunk => controller.enqueue(encoder.encode(chunk)));
-            controller.close();
-        },
-    });
-    return new Response(body, { status: 200, ...init });
-}
-
-/** Drain an async iterable into an array. */
-async function collect (iterable) {
-    var out = [];
-    for await (var value of iterable) {
-        out.push(value);
-    }
-    return out;
-}
-
-function withFetch (impl, fn) {
-    var original = globalThis.fetch;
-    globalThis.fetch = impl;
-    return Promise.resolve().then(fn).finally(() => { globalThis.fetch = original; });
-}
+const { collect, streamedResponse, withFetch } = require('./helpers.js');
 
 test('createSseDecoder frames an event on the blank line', () => {
     var decoder = createSseDecoder();
@@ -85,6 +56,81 @@ test('createSseDecoder discards an unterminated trailing frame', () => {
     var decoder = createSseDecoder();
     assert.deepStrictEqual(decoder.push('data: complete\n\ndata: cut off'), [
         { data: 'complete', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder treats a line with no colon as a field with an empty value', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('data\n\n'), [
+        { data: '', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder ignores fields it does not know', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('foo: bar\ndata: x\n\n'), [
+        { data: 'x', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder ignores a retry that is not a number', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('retry: soon\nretry: 12ms\ndata: x\n\n'), [
+        { data: 'x', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder strips exactly one space after the colon', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('data:tight\n\ndata:  padded\n\n'), [
+        { data: 'tight', event: 'message', id: '', retry: null },
+        { data: ' padded', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder resets the event type between frames', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('event: named\ndata: a\n\ndata: b\n\n'), [
+        { data: 'a', event: 'named', id: '', retry: null },
+        { data: 'b', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder resets the event type on a frame that carried no data', () => {
+    var decoder = createSseDecoder();
+    // An `event:` with nothing to go with it isn't dispatched, and mustn't leak
+    // its name onto the next frame.
+    assert.deepStrictEqual(decoder.push('event: named\n\n'), []);
+    assert.deepStrictEqual(decoder.push('data: x\n\n'), [
+        { data: 'x', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder lets an empty id clear the one carried forward', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('id: 7\ndata: a\n\nid\ndata: b\n\n'), [
+        { data: 'a', event: 'message', id: '7', retry: null },
+        { data: 'b', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder yields nothing for blank lines on their own', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('\n\n\n'), []);
+});
+
+test('createSseDecoder accepts CRLF and LF endings in the same stream', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('data: a\r\n\r\ndata: b\n\n'), [
+        { data: 'a', event: 'message', id: '', retry: null },
+        { data: 'b', event: 'message', id: '', retry: null },
+    ]);
+});
+
+test('createSseDecoder accepts a bare CR as a line ending', () => {
+    var decoder = createSseDecoder();
+    assert.deepStrictEqual(decoder.push('data: a\r\rdata: b'), [
+        { data: 'a', event: 'message', id: '', retry: null },
     ]);
 });
 
@@ -183,6 +229,176 @@ test('withSignal passes the signal through to fetch', () => {
         async () => {
             await collect(http('/stream').withSignal(controller.signal).requestSse());
             assert.strictEqual(seen.signal, controller.signal);
+        }
+    );
+});
+
+test('a cancel that fails on the way out is swallowed', () => {
+    // The cleanup is best-effort: a body that refuses to cancel must not turn
+    // into a rejection the consumer never asked for.
+    var body = new ReadableStream({
+        start (controller) { controller.enqueue(new TextEncoder().encode('data: 1\n\n')); },
+        cancel () { throw new Error('cancel failed'); },
+    });
+    return withFetch(
+        async () => new Response(body, { status: 200 }),
+        async () => {
+            for await (var event of http('/stream').requestSse()) {
+                assert.strictEqual(event.data, '1');
+                break;
+            }
+        }
+    );
+});
+
+test('requestSse yields nothing when the stream carries only keepalives', () => {
+    return withFetch(
+        async () => streamedResponse([ ': ping\n\n', ': ping\n\n' ]),
+        async () => {
+            assert.deepStrictEqual(await collect(http('/stream').requestSse()), []);
+        }
+    );
+});
+
+test('requestStream hands back the body stream for the caller to drive', () => {
+    return withFetch(
+        async () => streamedResponse([ 'one', 'two' ]),
+        async () => {
+            var stream = await http('/download').requestStream();
+            assert.strictEqual(typeof stream.getReader, 'function');
+            var reader = stream.getReader();
+            var decoder = new TextDecoder();
+            var out = '';
+            for (;;) {
+                let result = await reader.read();
+                if (result.done) {
+                    break;
+                }
+                out += decoder.decode(result.value, { stream: true });
+            }
+            assert.strictEqual(out, 'onetwo');
+        }
+    );
+});
+
+test('requestStream rejects when the response has no body', () => {
+    return withFetch(
+        async () => ({ body: null, ok: true, status: 200 }),
+        async () => {
+            await assert.rejects(http('/download').requestStream(), /no readable body stream/);
+        }
+    );
+});
+
+test('requestStream rejects when the body is not a stream', () => {
+    // A polyfill can hand back a body that isn't readable incrementally.
+    return withFetch(
+        async () => ({ body: {}, ok: true, status: 200 }),
+        async () => {
+            await assert.rejects(http('/download').requestStream(), /no readable body stream/);
+        }
+    );
+});
+
+test('requestStream rejects on a non-ok response', () => {
+    return withFetch(
+        async () => new Response('nope', { status: 404, statusText: 'Not Found' }),
+        async () => {
+            var err = await http('/download').requestStream().then(() => null, e => e);
+            assert.ok(err, 'expected a rejection');
+            assert.strictEqual(err.status, 404);
+            assert.strictEqual(err.message, 'HTTP 404 Not Found');
+            assert.strictEqual(err.response.status, 404);
+        }
+    );
+});
+
+test('a non-ok response with no status text still gets a usable message', () => {
+    return withFetch(
+        async () => ({ body: null, ok: false, status: 500, statusText: '' }),
+        async () => {
+            var err = await http('/download').requestStream().then(() => null, e => e);
+            assert.strictEqual(err.message, 'HTTP 500');
+        }
+    );
+});
+
+test('requestTextStream rejects on a non-ok response', () => {
+    return withFetch(
+        async () => new Response('nope', { status: 403, statusText: 'Forbidden' }),
+        async () => {
+            var err = await collect(http('/text').requestTextStream()).then(() => null, e => e);
+            assert.ok(err, 'expected a rejection');
+            assert.strictEqual(err.status, 403);
+        }
+    );
+});
+
+test('requestTextStream yields nothing when the non-stream body is empty', () => {
+    return withFetch(
+        async () => ({ body: null, ok: true, status: 200, text: async () => '' }),
+        async () => {
+            assert.deepStrictEqual(await collect(http('/text').requestTextStream()), []);
+        }
+    );
+});
+
+test('requestTextStream falls back when the body is not a readable stream', () => {
+    return withFetch(
+        async () => ({ body: {}, ok: true, status: 200, text: async () => 'all at once' }),
+        async () => {
+            assert.deepStrictEqual(await collect(http('/text').requestTextStream()), [ 'all at once' ]);
+        }
+    );
+});
+
+test('requestTextStream skips a chunk that decodes to nothing', () => {
+    // The first chunk is only the leading half of a 4-byte character, so it
+    // decodes to the empty string - nothing worth yielding.
+    var bytes = new TextEncoder().encode('😀');
+    var body = new ReadableStream({
+        start (controller) {
+            controller.enqueue(bytes.slice(0, 2));
+            controller.enqueue(bytes.slice(2));
+            controller.close();
+        },
+    });
+    return withFetch(
+        async () => new Response(body, { status: 200 }),
+        async () => {
+            assert.deepStrictEqual(await collect(http('/text').requestTextStream()), [ '😀' ]);
+        }
+    );
+});
+
+test('requestTextStream flushes what the decoder held for a character that never finished', () => {
+    // The stream ends mid-character; the decoder's flush turns the orphaned
+    // bytes into a replacement character rather than dropping them silently.
+    var bytes = new TextEncoder().encode('ok😀');
+    var body = new ReadableStream({
+        start (controller) {
+            controller.enqueue(bytes.slice(0, 4));
+            controller.close();
+        },
+    });
+    return withFetch(
+        async () => new Response(body, { status: 200 }),
+        async () => {
+            assert.deepStrictEqual(await collect(http('/text').requestTextStream()), [ 'ok', '�' ]);
+        }
+    );
+});
+
+test('an aborted signal rejects the stream', () => {
+    var controller = new AbortController();
+    controller.abort();
+    return withFetch(
+        async (url, opts) => {
+            opts.signal.throwIfAborted();
+            return streamedResponse([ 'data: 1\n\n' ]);
+        },
+        async () => {
+            await assert.rejects(collect(http('/stream').withSignal(controller.signal).requestSse()));
         }
     );
 });

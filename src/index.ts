@@ -177,6 +177,15 @@ export class HttpRequest {
     }
 
     /**
+     * Set the method of the fetch request to PATCH.
+     * @returns {HttpRequest} - Returns the current instance of the HttpRequest.
+     */
+    patch () : HttpRequest {
+        this.opts.method = 'PATCH';
+        return this;
+    }
+
+    /**
      * Set the method of the fetch request to DELETE.
      * @returns {HttpRequest} - Returns the current instance of the HttpRequest.
      */

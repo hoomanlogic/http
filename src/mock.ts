@@ -5,25 +5,67 @@
  * @see https://github.com/hoomanlogic/http/-/blob/main/doc/README.md
  */
 
+/**
+ * The http methods the mock, unmocked and recorded maps each keep a bucket for.
+ */
+const METHODS = [ 'delete', 'get', 'patch', 'post', 'put' ];
+
+/**
+ * The methods that carry a request body. Their mocks and recordings are broken
+ * out by that body, since the same url can mean different things depending on
+ * what was sent to it.
+ */
+const BODY_METHODS = [ 'patch', 'post', 'put' ];
+
+/**
+ * A map with an empty bucket per method - the shape of `mockMap`,
+ * `requestCatcher` and `unmockedMap`.
+ */
+function emptyMethodMap () : {} {
+    var map = {};
+    METHODS.forEach(method => {
+        map[method] = {};
+    });
+    return map;
+}
+
+/**
+ * Copy a method map with its urls in sorted order, and - for the methods that
+ * break their recordings out by request body - the bodies sorted within each
+ * url. Every standard method gets a bucket in the output whether it recorded
+ * anything or not, so the shape is stable enough to diff between runs.
+ */
+function sortMethodMap (map) : {} {
+    var sorted = emptyMethodMap();
+    Object.keys(map).sort().forEach(method => {
+        var urls = Object.keys(map[method]);
+        urls.sort();
+        sorted[method] = {};
+        urls.forEach(url => {
+            if (BODY_METHODS.indexOf(method) === -1) {
+                sorted[method][url] = map[method][url];
+                return;
+            }
+            sorted[method][url] = {};
+            var bodies = Object.keys(map[method][url]);
+            bodies.sort();
+            bodies.forEach(body => {
+                sorted[method][url][body] = map[method][url][body];
+            });
+        });
+    });
+    return sorted;
+}
+
 export default function (http) {
     global.http = http;
-    
+
     // Set this to true to include query params in the recorded urls
     http.recordQueryParams = false;
 
-    http.requestCatcher = {
-        delete: {},
-        get: {},
-        post: {},
-        put: {},
-    };
+    http.requestCatcher = emptyMethodMap();
 
-    http.unmockedMap = {
-        delete: {},
-        get: {},
-        post: {},
-        put: {},
-    };
+    http.unmockedMap = emptyMethodMap();
 
     /**
      * Clear the map of mocked requests.
@@ -32,12 +74,7 @@ export default function (http) {
      */
     http.clearMocks = function () {
         http.hasMocks = false;
-        http.mockMap = {
-            delete: {},
-            get: {},
-            post: {},
-            put: {},
-        };
+        http.mockMap = emptyMethodMap();
     };
 
     // Ensure mockMap is defined
@@ -48,43 +85,7 @@ export default function (http) {
      * @memberof http-mock
      */
     http.dumpRequestMap = function () {
-        var keySortedRequestCatcher = {
-            delete: {},
-            get: {},
-            post: {},
-            put: {},
-        };
-
-        var deleteKeys = Object.keys(http.requestCatcher.delete);
-        deleteKeys.sort();
-        deleteKeys.forEach(deleteKey => {
-            keySortedRequestCatcher.delete[deleteKey] = http.requestCatcher.delete[deleteKey];
-        });
-
-        var getKeys = Object.keys(http.requestCatcher.get);
-        getKeys.sort();
-        getKeys.forEach(getKey => {
-            keySortedRequestCatcher.get[getKey] = http.requestCatcher.get[getKey];
-        });
-
-        var postKeys = Object.keys(http.requestCatcher.post);
-        postKeys.sort();
-        postKeys.forEach(postKey => {
-            keySortedRequestCatcher.post[postKey] = {};
-            var postRequestKeys = Object.keys(http.requestCatcher.post[postKey]);
-            postRequestKeys.sort();
-            postRequestKeys.forEach(postRequestKey => {
-                keySortedRequestCatcher.post[postKey][postRequestKey] = http.requestCatcher.post[postKey][postRequestKey];
-            });
-        });
-
-        var putKeys = Object.keys(http.requestCatcher.put);
-        putKeys.sort();
-        putKeys.forEach(putKey => {
-            keySortedRequestCatcher.put[putKey] = http.requestCatcher.put[putKey];
-        });
-
-        return JSON.stringify(keySortedRequestCatcher, null, 4);
+        return JSON.stringify(sortMethodMap(http.requestCatcher), null, 4);
     };
 
     /**
@@ -92,43 +93,7 @@ export default function (http) {
      * @memberof http-mock
      */
     http.dumpUnmockedRequestMap = function () {
-        var keySortedUnmockedMap = {
-            delete: {},
-            get: {},
-            post: {},
-            put: {},
-        };
-
-        var deleteKeys = Object.keys(http.unmockedMap.delete);
-        deleteKeys.sort();
-        deleteKeys.forEach(deleteKey => {
-            keySortedUnmockedMap.delete[deleteKey] = http.unmockedMap.delete[deleteKey];
-        });
-
-        var getKeys = Object.keys(http.unmockedMap.get);
-        getKeys.sort();
-        getKeys.forEach(getKey => {
-            keySortedUnmockedMap.get[getKey] = http.unmockedMap.get[getKey];
-        });
-
-        var postKeys = Object.keys(http.unmockedMap.post);
-        postKeys.sort();
-        postKeys.forEach(postKey => {
-            keySortedUnmockedMap.post[postKey] = {};
-            var postRequestKeys = Object.keys(http.unmockedMap.post[postKey]);
-            postRequestKeys.sort();
-            postRequestKeys.forEach(postRequestKey => {
-                keySortedUnmockedMap.post[postKey][postRequestKey] = http.unmockedMap.post[postKey][postRequestKey];
-            });
-        });
-
-        var putKeys = Object.keys(http.unmockedMap.put);
-        putKeys.sort();
-        putKeys.forEach(putKey => {
-            keySortedUnmockedMap.put[putKey] = http.unmockedMap.put[putKey];
-        });
-
-        return JSON.stringify(keySortedUnmockedMap, null, 4);
+        return JSON.stringify(sortMethodMap(http.unmockedMap), null, 4);
     };
 
     /**
@@ -157,39 +122,31 @@ export default function (http) {
      * @memberof http-mock
      */
     http.mockRequestMap = function (requestMap) {
-        // Map recorded GET requests
-        Object.keys(requestMap.get).forEach(url => {
-            http.mock('get', url, () => {
-                return http.mockResponse(200, requestMap.get[url]);
-            });
-        });
+        METHODS.forEach(method => {
+            // A map that doesn't mention a method simply has nothing to mock
+            // for it.
+            var recorded = requestMap[method];
+            if (!recorded) {
+                return;
+            }
 
-        // Map recorded POST requests
-        Object.keys(requestMap.post).forEach(url => {
-            http.mock('post', url, ({ requestBody }) => {
-                var response = requestMap.post[url][requestBody];
-                if (response === undefined) {
+            Object.keys(recorded).forEach(url => {
+                if (BODY_METHODS.indexOf(method) === -1) {
+                    http.mock(method, url, () => {
+                        return http.mockResponse(200, recorded[url]);
+                    });
                     return;
                 }
-                return http.mockResponse(200, response);
-            });
-        });
 
-        // Map recorded PUT requests
-        Object.keys(requestMap.put).forEach(url => {
-            http.mock('put', url, ({ requestBody }) => {
-                var response = requestMap.put[url][requestBody];
-                if (response === undefined) {
-                    return;
-                }
-                return http.mockResponse(200, response);
-            });
-        });
-
-        // Map recorded DELETE requests
-        Object.keys(requestMap.delete).forEach(url => {
-            http.mock('delete', url, () => {
-                return http.mockResponse(200, requestMap.delete[url]);
+                // Only the bodies that were recorded are answered; anything
+                // else is left for the caller to handle.
+                http.mock(method, url, ({ requestBody }) => {
+                    var response = recorded[url][requestBody];
+                    if (response === undefined) {
+                        return;
+                    }
+                    return http.mockResponse(200, response);
+                });
             });
         });
     };
@@ -228,7 +185,7 @@ export default function (http) {
             promises = promises.concat(refreshObj.post.map((request, idx) => {
                 return new Promise((resolve) => {
                     setTimeout(function () {
-                        http(request[0]).post().withStringBody(request[1]).requestJson().then(resolve).catch(resolve);
+                        http(request[0]).post().withTextBody(request[1]).requestJson().then(resolve).catch(resolve);
                     }, (idx + 1) * 500);
                 });
             }));
@@ -246,8 +203,9 @@ export default function (http) {
             // Recorded request urls do not include query params by default
             var url = http.recordQueryParams ? this.url : this.url.split('?')[0];
             let method = (this.opts.method || 'get').toLowerCase();
-            // Breakout POST and PUT requests by the request body
-            if ([ 'post', 'put' ].includes(method)) {
+            http.requestCatcher[method] = http.requestCatcher[method] || {};
+            // Breakout the body-carrying requests by the request body
+            if (BODY_METHODS.includes(method)) {
                 http.requestCatcher[method][url] = http.requestCatcher[method][url] || {};
                 http.requestCatcher[method][url][this.opts.body] = 'OK';
             }
@@ -273,9 +231,12 @@ export default function (http) {
         var method = (opts.method || 'get').toLowerCase();
         var urlNoParams = url.split('?')[0];
         var params = getQueryParams(url);
+        // A method with no bucket of its own has no mocks to offer. Leave the
+        // request alone rather than throwing on the lookup.
+        var methodMocks = http.mockMap[method] || {};
 
         // First try to match w query params (if applicable), then try to match base url
-        var handler = http.mockMap[method][url] || http.mockMap[method][urlNoParams];
+        var handler = methodMocks[url] || methodMocks[urlNoParams];
         if (handler) {
             let response = handler({ params, requestBody: opts.body, url });
             if (response) {
@@ -284,7 +245,7 @@ export default function (http) {
         }
         else {
             // Try to match pattern on url
-            let mockUrls = Object.keys(http.mockMap[method] || {});
+            let mockUrls = Object.keys(methodMocks);
             let urlParts = urlNoParams.split('/');
 
             for (let i = 0; i < mockUrls.length; i++) {
@@ -326,7 +287,7 @@ export default function (http) {
 
                 if (!noMatch) {
                     // Invoke the mocked request handler
-                    handler = http.mockMap[method][mockUrl];
+                    handler = methodMocks[mockUrl];
                     let response = handler({ params, requestBody: opts.body, url });
                     if (response) {
                         return Promise.resolve(response);
@@ -343,7 +304,8 @@ export default function (http) {
         }
 
         if (http.onUnmockedRequest) {
-            if (method === 'post' || method === 'put') {
+            http.unmockedMap[method] = http.unmockedMap[method] || {};
+            if (BODY_METHODS.includes(method)) {
                 http.unmockedMap[method][url] = http.unmockedMap[method][url] || {};
                 http.unmockedMap[method][url][opts.body] = '';
             }
